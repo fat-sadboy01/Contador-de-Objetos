@@ -1,0 +1,149 @@
+import numpy as np  # Importa a biblioteca numpy e a renomeia para np
+import argparse  # Importa a biblioteca argparse para análise de linha de comando
+import cv2 as cv  # Importa a biblioteca OpenCV e a renomeia para cv
+import time  # Importa a biblioteca time para medições de tempo
+
+# Define constantes para os nomes dos arquivos de rótulos, configuração e pesos do modelo YOLO.
+LABELS_FILE = "coco.names"
+CONFIG_FILE = "yolov4.cfg"
+WEIGHTS_FILE = "yolov4.weights"
+
+# Define um limiar de confiança para detecção de objetos.
+CONFIDENCE_THRESHOLD = 0.3
+
+# Lê os rótulos do arquivo e os armazena em uma lista.
+LABELS = open(LABELS_FILE).read().strip().split("\n")
+
+# Define uma semente para geração de números aleatórios para cores.
+np.random.seed(4)
+# Gera cores aleatórias para cada rótulo.
+COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
+
+# Carrega o modelo YOLO a partir dos arquivos de configuração e pesos.
+net = cv.dnn.readNetFromDarknet(CONFIG_FILE, WEIGHTS_FILE)
+
+# Obtém os nomes das camadas de saída
+ln = net.getLayerNames()
+ln = [ln[i - 1] for i in net.getUnconnectedOutLayers()]
+
+# A função a seguir percorre os objetos detectados encontrados na imagem, 
+#verifica se a confiança está acima do limite mínimo e, em caso afirmativo, 
+#adiciona a caixa à matriz de caixas junto com as coordenadas em que a detecção foi descoberta.
+# Em seguida, ele verifica se há mais de uma detecção e, em caso afirmativo, 
+#desenha a caixa junto com o rótulo do objeto e a confiança na imagem.
+# Finalmente, a imagem modificada é mostrada na tela.
+def drawBoxes(image, layerOutputs, H, W):
+    boxes = []
+    confidences = []
+    classIDs = []
+
+    for output in layerOutputs:
+        for detection in output:
+            scores = detection[5:]
+            classID = np.argmax(scores)
+            confidence = scores[classID]
+
+            if confidence > CONFIDENCE_THRESHOLD:
+                box = detection[0:4] * np.array([W, H, W, H])
+                (centerX, centerY, width, height) = box.astype("int")
+
+                x = int(centerX - (width / 2))
+                y = int(centerY - (height / 2))
+
+                boxes.append([x, y, int(width), int(height)])
+                confidences.append(float(confidence))
+                classIDs.append(classID)
+
+    idxs = cv.dnn.NMSBoxes(boxes, confidences, CONFIDENCE_THRESHOLD, CONFIDENCE_THRESHOLD)
+
+    objects_count = {label: 0 for label in LABELS}
+
+    if len(idxs) > 0:
+        for i in idxs.flatten():
+            classID = classIDs[i]
+            label = LABELS[classID]
+            objects_count[label] += 1
+
+            (x, y) = (boxes[i][0], boxes[i][1])
+            (w, h) = (boxes[i][2], boxes[i][3])
+
+            color = [int(c) for c in COLORS[classID]]
+
+            cv.rectangle(image, (x, y), (x + w, y + h), color, 2)
+            text = "{}: {:.4f}".format(label, confidences[i])
+            cv.putText(image, text, (x, y - 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+    cv.imshow("Imagem com Objetos Detectados", image)
+
+    return objects_count
+
+# Função para contar objetos em movimento em um vídeo
+def detectObjectsInVideo(videoPath=None, camera_index=None, resize_factor=1.0):
+    # Verifica se o caminho do vídeo foi fornecido
+    if not videoPath:
+        print("Por favor, forneça o caminho para um vídeo usando -v.")
+        return
+
+    # Inicializa o objeto VideoCapture para ler o vídeo
+    cap = cv.VideoCapture(videoPath)
+    
+    # Loop para iterar sobre os frames do vídeo
+    while True:
+        # Lê o próximo frame do vídeo
+        ret, frame = cap.read()
+        # Verifica se o frame foi lido corretamente
+        if not ret:
+            break
+        
+        # Redimensiona o frame para uma resolução menor
+        if resize_factor != 1.0:
+            frame = cv.resize(frame, None, fx=resize_factor, fy=resize_factor)
+
+        # Obtém as dimensões do frame
+        (H, W) = frame.shape[:2]
+        
+        # Converte o frame em um blob para a entrada da rede
+        blob = cv.dnn.blobFromImage(frame, 1 / 255.0, (416, 416), swapRB=True, crop=False)
+        
+        # Define o blob como entrada da rede
+        net.setInput(blob)
+        
+        # Obtem as saídas das camadas
+        layerOutputs = net.forward(ln)
+        
+        # Desenha caixas delimitadoras nos objetos detectados no frame
+        objects_count = drawBoxes(frame, layerOutputs, H, W)
+
+        # Imprime a contagem de objetos no terminal
+        print("Quantidade de objetos detectados:")
+        for label, count in objects_count.items():
+            print(f"{label}: {count}")
+
+        # Pressione 'Esc' para sair do loop
+        if cv.waitKey(1) & 0xFF == 27:
+            break
+
+    # Libera o objeto VideoCapture e fecha todas as janelas
+    cap.release()
+    cv.destroyAllWindows()
+
+# Execução do programa principal via linha de comando com argumentos
+# Usamos argparse para ler o caminho do arquivo na linha de comando, chamar a 
+#função acima e esperar que o usuário pressione qualquer tecla.
+# Uma vez feito isso, limpamos destruindo a janela.
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-i", "--image", help="Caminho para a imagem")
+    ap.add_argument("-v", "--video", help="Caminho para o vídeo")
+    ap.add_argument("-c", "--camera", type=int, default=0, help="Índice da câmera (0 para webcam padrão)")
+    ap.add_argument("-r", "--resize", type=float, default=1.0, help="Fator de redimensionamento do frame (0-1 para reduzir)")
+
+    args = vars(ap.parse_args())
+    if args["image"]:
+        detectObjectsInImage(args["image"])
+    elif args["video"]:
+        detectObjectsInVideo(videoPath=args["video"], resize_factor=args["resize"])
+    elif args["camera"] is not None:  # Verifica se o índice da câmera foi fornecido
+        detectObjectsInVideo(camera_index=args["camera"], resize_factor=args["resize"])
+    else:
+        print("Por favor, forneça o caminho para uma imagem usando -i, para um vídeo usando -v, ou o índice da câmera usando -c.")
